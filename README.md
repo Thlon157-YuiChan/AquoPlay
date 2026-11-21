@@ -100,4 +100,4 @@ MIT
 ## 謝辞
 
 - [pydtcpip](https://pypi.org/project/pydtcpip/) — DTCP-IP / DLNA プロトコル実装
-- [@markun_Dh](https://x.com/markun_Dh) — DiNAS Minter (DTCP-IP デバイス認証情報取得ツール)
+- [@markun_Dh](https://x.com/markun_Dh) — DTCP-IP 鍵についての研究
