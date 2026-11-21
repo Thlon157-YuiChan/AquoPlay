@@ -263,12 +263,13 @@ func playCmd(url string, rec recording) tea.Cmd {
 
 	var playerBin string
 	var playerArgs string
+	title := shellQuote(rec.Title)
 	if mpvBin != "" {
 		playerBin = mpvBin
-		playerArgs = "--no-terminal --force-seekable=no --cache=yes -"
+		playerArgs = fmt.Sprintf("--no-terminal --force-seekable=no --cache=yes --title=%s -", title)
 	} else {
 		playerBin = ffplayBin
-		playerArgs = "-loglevel panic -nostats -autoexit -i pipe:0"
+		playerArgs = fmt.Sprintf("-loglevel panic -nostats -autoexit -window_title %s -i pipe:0", title)
 	}
 
 	script := fmt.Sprintf("%s %s %s %s | %s %s",
