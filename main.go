@@ -439,17 +439,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.currentFolder == "" {
 			m.currentFolder = "0"
 		}
+		hasAll := false
+		for _, f := range m.folders {
+			if f.ID == "ALL" {
+				hasAll = true
+				break
+			}
+		}
+		if !hasAll && len(m.recs) > 0 {
+			m.folders = append([]folder{{ID: "ALL", Title: "すべての録画", ParentID: "0"}}, m.folders...)
+		}
 		// Determine view mode: show folders if current folder has sub-folders
 		subFolders := m.subFolders(m.currentFolder)
 		recsInFolder := m.recordingsInFolder(m.currentFolder)
-		if len(subFolders) > 0 {
-			m.viewMode = "folders"
-			m.status = ""
-		} else if len(recsInFolder) > 0 {
-			m.viewMode = "recordings"
+		if len(subFolders) > 0 || len(recsInFolder) > 0 {
+			m.viewMode = "mixed"
 			m.status = ""
 		} else if len(m.recs) > 0 {
-			// Fallback: show all recordings flat if current folder is empty
 			m.viewMode = "recordings"
 			m.currentFolder = "0"
 			m.status = "フォルダ構造が異なるため、全録画を表示しています。"
@@ -493,91 +499,58 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case phaseList:
-			if m.viewMode == "folders" {
-				subFolders := m.subFolders(m.currentFolder)
-				switch msg.String() {
-				case "up", "k":
-					if m.cursor > 0 {
-						m.cursor--
-					}
-				case "down", "j":
-					if m.cursor < len(subFolders)-1 {
-						m.cursor++
-					}
-				case "r":
-					m.status = "録画を読み込んでいます..."
-					m.err = ""
-					return m, browseCmd(m.serverURL)
-				case "esc":
-					if len(m.servers) > 1 {
-						m.phase = phaseServers
-					}
-				case "p", "P", "enter":
-					if len(subFolders) > 0 && m.cursor < len(subFolders) {
+			subFolders := m.subFolders(m.currentFolder)
+			recs := m.recordingsInFolder(m.currentFolder)
+			// In "ALL" mode, show all recordings
+			if m.currentFolder == "ALL" {
+				recs = m.recs
+			}
+			// Total items = subFolders + recs
+			totalItems := len(subFolders) + len(recs)
+
+			switch msg.String() {
+			case "up", "k":
+				if m.cursor > 0 {
+					m.cursor--
+				}
+			case "down", "j":
+				if m.cursor < totalItems-1 {
+					m.cursor++
+				}
+			case "r":
+				m.status = "録画を読み込んでいます..."
+				m.err = ""
+				return m, browseCmd(m.serverURL)
+			case "esc":
+				if len(m.servers) > 1 {
+					m.phase = phaseServers
+				}
+			case "p", "P", "enter":
+				if m.cursor < len(subFolders) {
+					// Open folder
+					if len(subFolders) > 0 {
 						m.currentFolder = subFolders[m.cursor].ID
 						m.cursor = 0
-						// Check if new folder has sub-folders
-						if len(m.subFolders(m.currentFolder)) > 0 {
-							m.viewMode = "folders"
-						} else {
-							m.viewMode = "recordings"
-						}
 						m.status = ""
 					}
-				case "backspace":
-					parent := m.parentFolder(m.currentFolder)
-					if parent == "" {
-						parent = "0"
-					}
-					if parent != m.currentFolder {
-						m.currentFolder = parent
-						m.cursor = 0
-						if len(m.subFolders(m.currentFolder)) > 0 {
-							m.viewMode = "folders"
-						} else {
-							m.viewMode = "recordings"
-						}
-						// If the folder is empty, go up further
-						for m.currentFolder != "0" && len(m.subFolders(m.currentFolder)) == 0 && len(m.recordingsInFolder(m.currentFolder)) == 0 {
-							p := m.parentFolder(m.currentFolder)
-							if p == "" || p == m.currentFolder {
-								break
-							}
-							m.currentFolder = p
-							m.cursor = 0
-							if len(m.subFolders(m.currentFolder)) > 0 {
-								m.viewMode = "folders"
-							} else {
-								m.viewMode = "recordings"
-							}
-						}
+				} else {
+					// Play recording
+					recIdx := m.cursor - len(subFolders)
+					if recIdx >= 0 && recIdx < len(recs) {
+						m.status = "再生を開始しています..."
+						return m, playCmd(m.serverURL, recs[recIdx])
 					}
 				}
-			} else {
-				recs := m.recordingsInFolder(m.currentFolder)
-				switch msg.String() {
-				case "up", "k":
-					if m.cursor > 0 {
-						m.cursor--
+			case "backspace":
+				if m.currentFolder == "ALL" {
+					m.currentFolder = "0"
+					m.cursor = 0
+					if len(m.subFolders(m.currentFolder)) > 0 {
+						m.viewMode = "folders"
+					} else {
+						m.viewMode = "recordings"
 					}
-				case "down", "j":
-					if m.cursor < len(recs)-1 {
-						m.cursor++
-					}
-				case "r":
-					m.status = "録画を読み込んでいます..."
-					m.err = ""
-					return m, browseCmd(m.serverURL)
-				case "esc":
-					if len(m.servers) > 1 {
-						m.phase = phaseServers
-					}
-				case "p", "P":
-					if len(recs) > 0 && m.cursor < len(recs) {
-						m.status = "再生を開始しています..."
-						return m, playCmd(m.serverURL, recs[m.cursor])
-					}
-				case "backspace":
+				} else {
 					parent := m.parentFolder(m.currentFolder)
 					if parent == "" {
 						parent = "0"
@@ -591,7 +564,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							m.viewMode = "recordings"
 						}
 						// If the folder is empty, go up further
-						for m.currentFolder != "0" && len(m.subFolders(m.currentFolder)) == 0 && len(m.recordingsInFolder(m.currentFolder)) == 0 {
+						for m.currentFolder != "0" && len(m.subFolders(m.currentFolder)) == 0 && len(m.recordingsInFolder(m.currentFolder)) == 0 && m.currentFolder != "ALL" {
 							p := m.parentFolder(m.currentFolder)
 							if p == "" || p == m.currentFolder {
 								break
