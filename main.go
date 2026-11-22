@@ -436,19 +436,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.cursor = 0
 		m.phase = phaseList
 		m.err = ""
+		if m.currentFolder == "" {
+			m.currentFolder = "0"
+		}
 		// Determine view mode: show folders if current folder has sub-folders
 		subFolders := m.subFolders(m.currentFolder)
+		recsInFolder := m.recordingsInFolder(m.currentFolder)
 		if len(subFolders) > 0 {
 			m.viewMode = "folders"
+			m.status = ""
+		} else if len(recsInFolder) > 0 {
+			m.viewMode = "recordings"
+			m.status = ""
+		} else if len(m.recs) > 0 {
+			// Fallback: show all recordings flat if current folder is empty
+			m.viewMode = "recordings"
+			m.currentFolder = "0"
+			m.status = "フォルダ構造が異なるため、全録画を表示しています。"
 		} else {
 			m.viewMode = "recordings"
-		}
-		if m.viewMode == "folders" && len(subFolders) == 0 {
-			m.status = "フォルダが見つかりませんでした。"
-		} else if m.viewMode == "recordings" && len(m.recordingsInFolder(m.currentFolder)) == 0 {
 			m.status = "録画が見つかりませんでした。"
-		} else {
-			m.status = ""
 		}
 		return m, nil
 
@@ -519,7 +526,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				case "backspace":
 					parent := m.parentFolder(m.currentFolder)
-					if parent != "" && parent != "0" {
+					if parent == "" {
+						parent = "0"
+					}
+					if parent != m.currentFolder {
 						m.currentFolder = parent
 						m.cursor = 0
 						if len(m.subFolders(m.currentFolder)) > 0 {
@@ -527,10 +537,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						} else {
 							m.viewMode = "recordings"
 						}
-					} else if m.currentFolder != "0" && m.currentFolder != "0/HDD" {
-						m.currentFolder = "0/HDD"
-						m.cursor = 0
-						m.viewMode = "folders"
+						// If the folder is empty, go up further
+						for m.currentFolder != "0" && len(m.subFolders(m.currentFolder)) == 0 && len(m.recordingsInFolder(m.currentFolder)) == 0 {
+							p := m.parentFolder(m.currentFolder)
+							if p == "" || p == m.currentFolder {
+								break
+							}
+							m.currentFolder = p
+							m.cursor = 0
+							if len(m.subFolders(m.currentFolder)) > 0 {
+								m.viewMode = "folders"
+							} else {
+								m.viewMode = "recordings"
+							}
+						}
 					}
 				}
 			} else {
@@ -559,7 +579,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				case "backspace":
 					parent := m.parentFolder(m.currentFolder)
-					if parent != "" {
+					if parent == "" {
+						parent = "0"
+					}
+					if parent != m.currentFolder {
 						m.currentFolder = parent
 						m.cursor = 0
 						if len(m.subFolders(m.currentFolder)) > 0 {
@@ -567,10 +590,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						} else {
 							m.viewMode = "recordings"
 						}
-					} else {
-						m.currentFolder = "0/HDD"
-						m.cursor = 0
-						m.viewMode = "folders"
+						// If the folder is empty, go up further
+						for m.currentFolder != "0" && len(m.subFolders(m.currentFolder)) == 0 && len(m.recordingsInFolder(m.currentFolder)) == 0 {
+							p := m.parentFolder(m.currentFolder)
+							if p == "" || p == m.currentFolder {
+								break
+							}
+							m.currentFolder = p
+							m.cursor = 0
+							if len(m.subFolders(m.currentFolder)) > 0 {
+								m.viewMode = "folders"
+							} else {
+								m.viewMode = "recordings"
+							}
+						}
 					}
 				}
 			}
@@ -750,10 +783,77 @@ func listRecordings(serverURL string) error {
 	return nil
 }
 
+func dumpFolders(serverURL string) error {
+	servers := []server{{URL: serverURL}}
+	if serverURL == "" {
+		cmd := exec.Command("pydtcpip", "discover", "--timeout", "5")
+		cmd.Env = append(os.Environ(), "COLUMNS=300")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("%v\n%s", err, strings.TrimSpace(string(out)))
+		}
+		servers = parseServers(string(out))
+		if len(servers) == 0 {
+			return fmt.Errorf("レコーダーが見つかりませんでした")
+		}
+	}
+	for _, s := range servers {
+		fmt.Printf("%s  %s  %s\n", s.Name, s.Model, s.URL)
+
+		tmpDir, err := os.MkdirTemp("", "dlna-browse-")
+		if err != nil {
+			return err
+		}
+		scriptPath := filepath.Join(tmpDir, "browse.py")
+		if err := os.WriteFile(scriptPath, browseScript, 0o644); err != nil {
+			os.RemoveAll(tmpDir)
+			return err
+		}
+		pythonBin := findPython()
+		if pythonBin == "" {
+			os.RemoveAll(tmpDir)
+			return fmt.Errorf("pydtcpip が使える Python が見つかりません")
+		}
+		cmd := exec.Command(pythonBin, scriptPath, s.URL)
+		out, err := cmd.CombinedOutput()
+		os.RemoveAll(tmpDir)
+		if err != nil {
+			return fmt.Errorf("%v\n%s", err, strings.TrimSpace(string(out)))
+		}
+		folders, recs, err := parseBrowseResult(out)
+		if err != nil {
+			return err
+		}
+		fmt.Println("=== Folders ===")
+		for _, f := range folders {
+			fmt.Printf("  %s (parent: %s)\n", f.ID, f.ParentID)
+		}
+		fmt.Println("=== Recordings per folder ===")
+		folderCounts := make(map[string]int)
+		for _, r := range recs {
+			folderCounts[r.ParentID]++
+		}
+		for folder, count := range folderCounts {
+			fmt.Printf("  %s: %d recordings\n", folder, count)
+		}
+		fmt.Printf("Total: %d folders, %d recordings\n", len(folders), len(recs))
+	}
+	return nil
+}
+
 func main() {
 	list := flag.Bool("list", false, "list recordings without the terminal UI")
+	folders := flag.Bool("folders", false, "list folder structure without the terminal UI")
 	serverURL := flag.String("server", "", "device description URL (skip discovery)")
 	flag.Parse()
+
+	if *folders {
+		if err := dumpFolders(*serverURL); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	if *list {
 		if err := listRecordings(*serverURL); err != nil {
