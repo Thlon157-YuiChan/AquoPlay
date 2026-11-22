@@ -31,6 +31,12 @@ var browseScript []byte
 //go:embed stream.py
 var streamScript []byte
 
+type folder struct {
+	ID       string
+	Title    string
+	ParentID string
+}
+
 type server struct {
 	Name  string
 	Model string
@@ -58,17 +64,20 @@ const (
 )
 
 type model struct {
-	phase      phase
-	servers    []server
-	serverIdx  int
-	recs       []recording
-	cursor     int
-	width      int
-	height     int
-	err        string
-	status     string
-	serverURL  string
-	serverName string
+	phase          phase
+	servers        []server
+	serverIdx      int
+	folders        []folder
+	recs           []recording
+	currentFolder  string
+	viewMode       string // "folders" or "recordings"
+	cursor         int
+	width          int
+	height         int
+	err            string
+	status         string
+	serverURL      string
+	serverName     string
 }
 
 type serversMsg struct {
@@ -77,8 +86,9 @@ type serversMsg struct {
 }
 
 type recordingsMsg struct {
-	recs []recording
-	err  error
+	folders []folder
+	recs    []recording
+	err     error
 }
 
 type playbackDoneMsg struct {
@@ -154,14 +164,14 @@ func browseCmd(url string) tea.Cmd {
 		if err != nil {
 			return recordingsMsg{err: fmt.Errorf("%v\n%s", err, strings.TrimSpace(string(out)))}
 		}
-		recs, err := parseRecordingsJSON(out)
+		folders, recs, err := parseBrowseResult(out)
 		if err != nil {
 			return recordingsMsg{err: err}
 		}
-		if len(recs) == 0 {
+		if len(recs) == 0 && len(folders) == 0 {
 			return recordingsMsg{err: fmt.Errorf("録画が見つかりませんでした")}
 		}
-		return recordingsMsg{recs: recs}
+		return recordingsMsg{folders: folders, recs: recs}
 	}
 }
 
@@ -211,26 +221,48 @@ type didlRes struct {
 	Size     string `xml:"size,attr"`
 }
 
+type browseFolder struct {
+	ID         string `json:"id"`
+	Title      string `json:"title"`
+	ParentID   string `json:"parent_id"`
+	ChildCount *int   `json:"child_count"`
+}
+
 type browseRecording struct {
 	ID        string `json:"id"`
 	Title     string `json:"title"`
+	ParentID  string `json:"parent_id"`
 	Date      string `json:"date"`
 	Duration  string `json:"duration"`
 	Size      int64  `json:"size"`
 	Encrypted bool   `json:"encrypted"`
-	URL       string  `json:"url"`
-	Broadcast bool    `json:"broadcast"`
+	URL       string `json:"url"`
+	Broadcast bool   `json:"broadcast"`
 }
 
-func parseRecordingsJSON(data []byte) ([]recording, error) {
-	var items []browseRecording
-	if err := json.Unmarshal(data, &items); err != nil {
-		return nil, err
+type browseResult struct {
+	Folders    []browseFolder    `json:"folders"`
+	Recordings []browseRecording `json:"recordings"`
+}
+
+func parseBrowseResult(data []byte) ([]folder, []recording, error) {
+	var result browseResult
+	if err := json.Unmarshal(data, &result); err != nil {
+		return nil, nil, err
+	}
+	var folders []folder
+	for _, f := range result.Folders {
+		folders = append(folders, folder{
+			ID:       f.ID,
+			Title:    f.Title,
+			ParentID: f.ParentID,
+		})
 	}
 	var recs []recording
-	for _, item := range items {
+	for _, item := range result.Recordings {
 		rec := recording{
 			ID:        item.ID,
+			ParentID:  item.ParentID,
 			Title:     strings.TrimSpace(item.Title),
 			Date:      strings.TrimSpace(item.Date),
 			Duration:  item.Duration,
@@ -250,7 +282,7 @@ func parseRecordingsJSON(data []byte) ([]recording, error) {
 		}
 		return recs[i].Date > recs[j].Date
 	})
-	return recs, nil
+	return folders, recs, nil
 }
 
 func playCmd(url string, rec recording) tea.Cmd {
@@ -337,6 +369,38 @@ func (m model) Init() tea.Cmd {
 	return discoverCmd()
 }
 
+// subFolders returns folders whose parent is the given folder ID.
+func (m model) subFolders(parentID string) []folder {
+	var result []folder
+	for _, f := range m.folders {
+		if f.ParentID == parentID {
+			result = append(result, f)
+		}
+	}
+	return result
+}
+
+// recordingsInFolder returns recordings whose parent is the given folder ID.
+func (m model) recordingsInFolder(folderID string) []recording {
+	var result []recording
+	for _, r := range m.recs {
+		if r.ParentID == folderID {
+			result = append(result, r)
+		}
+	}
+	return result
+}
+
+// parentFolder returns the parent folder ID, or "" if at root.
+func (m model) parentFolder(folderID string) string {
+	for _, f := range m.folders {
+		if f.ID == folderID {
+			return f.ParentID
+		}
+	}
+	return ""
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -354,6 +418,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.serverName = msg.servers[0].Name
 			m.status = "録画を読み込んでいます..."
 			m.err = ""
+			m.currentFolder = "0"
 			return m, browseCmd(m.serverURL)
 		}
 		m.serverIdx = 0
@@ -366,11 +431,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.phase = phaseList
 			return m, nil
 		}
+		m.folders = msg.folders
 		m.recs = msg.recs
 		m.cursor = 0
 		m.phase = phaseList
 		m.err = ""
-		if len(msg.recs) == 0 {
+		// Determine view mode: show folders if current folder has sub-folders
+		subFolders := m.subFolders(m.currentFolder)
+		if len(subFolders) > 0 {
+			m.viewMode = "folders"
+		} else {
+			m.viewMode = "recordings"
+		}
+		if m.viewMode == "folders" && len(subFolders) == 0 {
+			m.status = "フォルダが見つかりませんでした。"
+		} else if m.viewMode == "recordings" && len(m.recordingsInFolder(m.currentFolder)) == 0 {
 			m.status = "録画が見つかりませんでした。"
 		} else {
 			m.status = ""
@@ -411,27 +486,92 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case phaseList:
-			switch msg.String() {
-			case "up", "k":
-				if m.cursor > 0 {
-					m.cursor--
+			if m.viewMode == "folders" {
+				subFolders := m.subFolders(m.currentFolder)
+				switch msg.String() {
+				case "up", "k":
+					if m.cursor > 0 {
+						m.cursor--
+					}
+				case "down", "j":
+					if m.cursor < len(subFolders)-1 {
+						m.cursor++
+					}
+				case "r":
+					m.status = "録画を読み込んでいます..."
+					m.err = ""
+					return m, browseCmd(m.serverURL)
+				case "esc":
+					if len(m.servers) > 1 {
+						m.phase = phaseServers
+					}
+				case "p", "P", "enter":
+					if len(subFolders) > 0 && m.cursor < len(subFolders) {
+						m.currentFolder = subFolders[m.cursor].ID
+						m.cursor = 0
+						// Check if new folder has sub-folders
+						if len(m.subFolders(m.currentFolder)) > 0 {
+							m.viewMode = "folders"
+						} else {
+							m.viewMode = "recordings"
+						}
+						m.status = ""
+					}
+				case "backspace":
+					parent := m.parentFolder(m.currentFolder)
+					if parent != "" && parent != "0" {
+						m.currentFolder = parent
+						m.cursor = 0
+						if len(m.subFolders(m.currentFolder)) > 0 {
+							m.viewMode = "folders"
+						} else {
+							m.viewMode = "recordings"
+						}
+					} else if m.currentFolder != "0" && m.currentFolder != "0/HDD" {
+						m.currentFolder = "0/HDD"
+						m.cursor = 0
+						m.viewMode = "folders"
+					}
 				}
-			case "down", "j":
-				if m.cursor < len(m.recs)-1 {
-					m.cursor++
-				}
-			case "r":
-				m.status = "録画を読み込んでいます..."
-				m.err = ""
-				return m, browseCmd(m.serverURL)
-			case "esc":
-				if len(m.servers) > 1 {
-					m.phase = phaseServers
-				}
-			case "p", "P":
-				if len(m.recs) > 0 {
-					m.status = "再生を開始しています..."
-					return m, playCmd(m.serverURL, m.recs[m.cursor])
+			} else {
+				recs := m.recordingsInFolder(m.currentFolder)
+				switch msg.String() {
+				case "up", "k":
+					if m.cursor > 0 {
+						m.cursor--
+					}
+				case "down", "j":
+					if m.cursor < len(recs)-1 {
+						m.cursor++
+					}
+				case "r":
+					m.status = "録画を読み込んでいます..."
+					m.err = ""
+					return m, browseCmd(m.serverURL)
+				case "esc":
+					if len(m.servers) > 1 {
+						m.phase = phaseServers
+					}
+				case "p", "P":
+					if len(recs) > 0 && m.cursor < len(recs) {
+						m.status = "再生を開始しています..."
+						return m, playCmd(m.serverURL, recs[m.cursor])
+					}
+				case "backspace":
+					parent := m.parentFolder(m.currentFolder)
+					if parent != "" {
+						m.currentFolder = parent
+						m.cursor = 0
+						if len(m.subFolders(m.currentFolder)) > 0 {
+							m.viewMode = "folders"
+						} else {
+							m.viewMode = "recordings"
+						}
+					} else {
+						m.currentFolder = "0/HDD"
+						m.cursor = 0
+						m.viewMode = "folders"
+					}
 				}
 			}
 		}
@@ -471,7 +611,12 @@ func (m model) listView() string {
 	if header != "" {
 		header += "  " + dimStyle.Render(m.serverURL)
 	}
-	b.WriteString(titleStyle.Render(header) + "\n\n")
+	b.WriteString(titleStyle.Render(header) + "\n")
+	folderPath := m.currentFolder
+	if folderPath == "" || folderPath == "0" {
+		folderPath = "ルート"
+	}
+	b.WriteString(dimStyle.Render("フォルダ: " + folderPath) + "\n\n")
 
 	height := m.height
 	if height <= 0 {
@@ -481,41 +626,70 @@ func (m model) listView() string {
 	if rows < 1 {
 		rows = 1
 	}
-	start := 0
-	if m.cursor >= rows {
-		start = m.cursor - rows + 1
-	}
-	end := start + rows
-	if end > len(m.recs) {
-		end = len(m.recs)
-	}
 	width := m.width
 	if width <= 0 {
 		width = 80
 	}
-	for i := start; i < end; i++ {
-		rec := m.recs[i]
-		prefix := "E"
-		if !rec.Encrypted {
-			prefix = "F"
+
+	if m.viewMode == "folders" {
+		subFolders := m.subFolders(m.currentFolder)
+		startIdx := 0
+		if m.cursor >= rows {
+			startIdx = m.cursor - rows + 1
 		}
-		if rec.Broadcast {
-			prefix = "L"
+		endIdx := startIdx + rows
+		if endIdx > len(subFolders) {
+			endIdx = len(subFolders)
 		}
-		line := fmt.Sprintf("%s  %s  %7s  %6s  %s",
-			prefix, shortDate(rec.Date), shortDuration(rec.Duration), humanSize(rec.Size), rec.Title)
-		if i == m.cursor {
-			b.WriteString(selStyle.MaxWidth(width).Render(line) + "\n")
-		} else {
-			b.WriteString(dimStyle.MaxWidth(width).Render(line) + "\n")
+		for i := startIdx; i < endIdx; i++ {
+			f := subFolders[i]
+			title := f.Title
+			if title == "" {
+				title = f.ID
+			}
+			line := fmt.Sprintf("[D] %s", title)
+			if i == m.cursor {
+				b.WriteString(selStyle.MaxWidth(width).Render(line) + "\n")
+			} else {
+				b.WriteString(dimStyle.MaxWidth(width).Render(line) + "\n")
+			}
 		}
+		b.WriteString("\n" + dimStyle.Render("↑↓: 選択  P/Enter: 開く  Backspace: 戻る  r: 更新  q: 終了"))
+	} else {
+		recs := m.recordingsInFolder(m.currentFolder)
+		startIdx := 0
+		if m.cursor >= rows {
+			startIdx = m.cursor - rows + 1
+		}
+		endIdx := startIdx + rows
+		if endIdx > len(recs) {
+			endIdx = len(recs)
+		}
+		for i := startIdx; i < endIdx; i++ {
+			rec := recs[i]
+			prefix := "E"
+			if !rec.Encrypted {
+				prefix = "F"
+			}
+			if rec.Broadcast {
+				prefix = "L"
+			}
+			line := fmt.Sprintf("%s  %s  %7s  %6s  %s",
+				prefix, shortDate(rec.Date), shortDuration(rec.Duration), humanSize(rec.Size), rec.Title)
+			if i == m.cursor {
+				b.WriteString(selStyle.MaxWidth(width).Render(line) + "\n")
+			} else {
+				b.WriteString(dimStyle.MaxWidth(width).Render(line) + "\n")
+			}
+		}
+		b.WriteString("\n" + dimStyle.Render("↑↓: 選択  P: 再生  Backspace: 戻る  r: 更新  q: 終了"))
 	}
-	b.WriteString("\n" + dimStyle.Render("↑↓: 選択  P: 再生  r: 更新  q: 終了"))
 	if m.status != "" {
 		b.WriteString("\n" + m.status)
 	}
 	return b.String()
 }
+
 
 func listRecordings(serverURL string) error {
 	servers := []server{{URL: serverURL}}
@@ -557,7 +731,7 @@ func listRecordings(serverURL string) error {
 		if err != nil {
 			return fmt.Errorf("%v\n%s", err, strings.TrimSpace(string(out)))
 		}
-		recs, err := parseRecordingsJSON(out)
+		_, recs, err := parseBrowseResult(out)
 		if err != nil {
 			return err
 		}
