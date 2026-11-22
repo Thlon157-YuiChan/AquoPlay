@@ -11,6 +11,7 @@ async def main() -> None:
     url = sys.argv[1]
     try:
         from pydtcpip import DLNAClient
+        from pydtcpip.operations import is_broadcast
     except ImportError:
         print("pydtcpip is not installed", file=sys.stderr)
         sys.exit(1)
@@ -20,6 +21,13 @@ async def main() -> None:
         recordings = []
         async for recording in server.iter_recordings():
             resource = recording.original_resource
+            if resource is None:
+                for r in recording.resources:
+                    if getattr(r.protocol_info, "is_dtcp", False):
+                        resource = r
+                        break
+                if resource is None and recording.resources:
+                    resource = recording.resources[0]
             size = 0
             if resource is not None and resource.attributes.get("size"):
                 try:
@@ -30,7 +38,7 @@ async def main() -> None:
             if duration is None and resource is not None:
                 duration = resource.duration
             encrypted = bool(resource is not None and resource.protocol_info.is_dtcp)
-            url = resource.url if resource is not None else ""
+            resource_url = resource.url if resource is not None else ""
             # Extract raw ccnum from source_xml
             ccnum = None
             if recording.source_xml:
@@ -46,7 +54,8 @@ async def main() -> None:
                     "duration": duration or "",
                     "size": size,
                     "encrypted": encrypted,
-                    "url": url,
+                    "url": resource_url,
+                    "broadcast": is_broadcast(recording),
                     "ccnum": ccnum,
                 }
             )

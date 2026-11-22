@@ -46,6 +46,7 @@ type recording struct {
 	Size      int64
 	Encrypted bool
 	URL       string
+	Broadcast bool
 }
 
 type phase int
@@ -170,6 +171,13 @@ func findPython() string {
 	if _, err := os.Stat(uvPython); err == nil {
 		return uvPython
 	}
+	// Try python3.13 explicitly
+	if path, err := exec.LookPath("python3.13"); err == nil {
+		check := exec.Command(path, "-c", "import pydtcpip")
+		if check.Run() == nil {
+			return path
+		}
+	}
 	// Try system python3 with pydtcpip
 	if path, err := exec.LookPath("python3"); err == nil {
 		check := exec.Command(path, "-c", "import pydtcpip")
@@ -210,7 +218,8 @@ type browseRecording struct {
 	Duration  string `json:"duration"`
 	Size      int64  `json:"size"`
 	Encrypted bool   `json:"encrypted"`
-	URL       string `json:"url"`
+	URL       string  `json:"url"`
+	Broadcast bool    `json:"broadcast"`
 }
 
 func parseRecordingsJSON(data []byte) ([]recording, error) {
@@ -228,6 +237,7 @@ func parseRecordingsJSON(data []byte) ([]recording, error) {
 			Size:      item.Size,
 			Encrypted: item.Encrypted,
 			URL:       item.URL,
+			Broadcast: item.Broadcast,
 		}
 		if rec.Title == "" {
 			rec.Title = filepath.Base(item.ID)
@@ -489,6 +499,9 @@ func (m model) listView() string {
 		if !rec.Encrypted {
 			prefix = "F"
 		}
+		if rec.Broadcast {
+			prefix = "L"
+		}
 		line := fmt.Sprintf("%s  %s  %7s  %6s  %s",
 			prefix, shortDate(rec.Date), shortDuration(rec.Duration), humanSize(rec.Size), rec.Title)
 		if i == m.cursor {
@@ -552,6 +565,9 @@ func listRecordings(serverURL string) error {
 			prefix := "E"
 			if !rec.Encrypted {
 				prefix = "F"
+			}
+			if rec.Broadcast {
+				prefix = "L"
 			}
 			fmt.Printf("%s  %s  %7s  %6s  %s\n",
 				prefix, shortDate(rec.Date), shortDuration(rec.Duration), humanSize(rec.Size), rec.Title)

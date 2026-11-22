@@ -4,6 +4,19 @@ recordings whose content encryption mode (E-EMI) is not supported by pydtcpip.""
 import asyncio
 import sys
 
+
+def pick_resource(recording):
+    resource = recording.original_resource
+    if resource is not None:
+        return resource
+    for r in recording.resources:
+        if getattr(r.protocol_info, "is_dtcp", False):
+            return r
+    if recording.resources:
+        return recording.resources[0]
+    return None
+
+
 async def main() -> None:
     if len(sys.argv) < 3:
         print("Usage: stream.py <server-url> <recording-id>", file=sys.stderr)
@@ -36,7 +49,7 @@ async def main() -> None:
     async with DLNAClient() as dlna:
         server = await dlna.get_server(url)
         recording = await server.get_metadata(recording_id)
-        resource = recording.original_resource
+        resource = pick_resource(recording)
         if resource is None:
             print("No playable resource found", file=sys.stderr)
             sys.exit(1)
@@ -56,22 +69,29 @@ async def main() -> None:
 
                 await client.stream(resource, on_data)
             return
+        except BrokenPipeError:
+            return  # Player closed; not an error
         except Exception as ex:
-            if "Unsupported content encryption mode" not in str(ex):
+            if "Unsupported content encryption mode" in str(ex):
+                pass  # Fall through to direct HTTP streaming below
+            else:
                 print(f"DTCP stream failed: {ex}", file=sys.stderr)
                 raise
-            # Fall through to direct HTTP streaming
 
         # Direct HTTP streaming for unsupported E-EMI (e.g., E-EMI 0x0)
         import urllib.request
 
         req = urllib.request.urlopen(target_url)
-        while True:
-            data = req.read(65536)
-            if not data:
-                break
-            sys.stdout.buffer.write(data)
-            sys.stdout.buffer.flush()
+        try:
+            while True:
+                data = req.read(65536)
+                if not data:
+                    break
+                sys.stdout.buffer.write(data)
+                sys.stdout.buffer.flush()
+        except BrokenPipeError:
+            return  # Player closed; not an error
+
 
 if __name__ == "__main__":
     asyncio.run(main())
