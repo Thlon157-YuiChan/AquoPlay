@@ -517,6 +517,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.cursor < totalItems-1 {
 					m.cursor++
 				}
+			case "pgup":
+				rows := m.height - 4
+				if rows < 1 {
+					rows = 1
+				}
+				m.cursor -= rows
+				if m.cursor < 0 {
+					m.cursor = 0
+				}
+			case "pgdown":
+				rows := m.height - 4
+				if rows < 1 {
+					rows = 1
+				}
+				totalItems := len(m.subFolders(m.currentFolder)) + len(m.recordingsInFolder(m.currentFolder))
+				if m.currentFolder == "ALL" {
+					totalItems = len(m.subFolders(m.currentFolder)) + len(m.recs)
+				}
+				m.cursor += rows
+				if m.cursor >= totalItems {
+					m.cursor = totalItems - 1
+				}
+				if m.cursor < 0 {
+					m.cursor = 0
+				}
 			case "r":
 				m.status = "録画を読み込んでいます..."
 				m.err = ""
@@ -686,7 +711,7 @@ func (m model) listView() string {
 			}
 		}
 	}
-	b.WriteString("\n" + dimStyle.Render("↑↓: 選択  P/Enter: 開く/再生  Backspace: 戻る  r: 更新  q: 終了"))
+	b.WriteString("\n" + dimStyle.Render("↑↓/PgUp/PgDn: 選択  P/Enter: 開く/再生  Backspace: 戻る  r: 更新  q: 終了"))
 	if m.status != "" {
 		b.WriteString("\n" + m.status)
 	}
