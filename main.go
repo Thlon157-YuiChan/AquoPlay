@@ -637,17 +637,25 @@ func (m model) listView() string {
 		width = 80
 	}
 
-	if m.viewMode == "folders" {
-		subFolders := m.subFolders(m.currentFolder)
-		startIdx := 0
-		if m.cursor >= rows {
-			startIdx = m.cursor - rows + 1
-		}
-		endIdx := startIdx + rows
-		if endIdx > len(subFolders) {
-			endIdx = len(subFolders)
-		}
-		for i := startIdx; i < endIdx; i++ {
+	subFolders := m.subFolders(m.currentFolder)
+	var recs []recording
+	if m.currentFolder == "ALL" {
+		recs = m.recs
+	} else {
+		recs = m.recordingsInFolder(m.currentFolder)
+	}
+	totalItems := len(subFolders) + len(recs)
+
+	startIdx := 0
+	if m.cursor >= rows {
+		startIdx = m.cursor - rows + 1
+	}
+	endIdx := startIdx + rows
+	if endIdx > totalItems {
+		endIdx = totalItems
+	}
+	for i := startIdx; i < endIdx; i++ {
+		if i < len(subFolders) {
 			f := subFolders[i]
 			title := f.Title
 			if title == "" {
@@ -659,20 +667,9 @@ func (m model) listView() string {
 			} else {
 				b.WriteString(dimStyle.MaxWidth(width).Render(line) + "\n")
 			}
-		}
-		b.WriteString("\n" + dimStyle.Render("↑↓: 選択  P/Enter: 開く  Backspace: 戻る  r: 更新  q: 終了"))
-	} else {
-		recs := m.recordingsInFolder(m.currentFolder)
-		startIdx := 0
-		if m.cursor >= rows {
-			startIdx = m.cursor - rows + 1
-		}
-		endIdx := startIdx + rows
-		if endIdx > len(recs) {
-			endIdx = len(recs)
-		}
-		for i := startIdx; i < endIdx; i++ {
-			rec := recs[i]
+		} else {
+			recIdx := i - len(subFolders)
+			rec := recs[recIdx]
 			prefix := "E"
 			if !rec.Encrypted {
 				prefix = "F"
@@ -688,8 +685,8 @@ func (m model) listView() string {
 				b.WriteString(dimStyle.MaxWidth(width).Render(line) + "\n")
 			}
 		}
-		b.WriteString("\n" + dimStyle.Render("↑↓: 選択  P: 再生  Backspace: 戻る  r: 更新  q: 終了"))
 	}
+	b.WriteString("\n" + dimStyle.Render("↑↓: 選択  P/Enter: 開く/再生  Backspace: 戻る  r: 更新  q: 終了"))
 	if m.status != "" {
 		b.WriteString("\n" + m.status)
 	}
@@ -819,7 +816,6 @@ func main() {
 	folders := flag.Bool("folders", false, "list folder structure without the terminal UI")
 	serverURL := flag.String("server", "", "device description URL (skip discovery)")
 	flag.Parse()
-
 	if *folders {
 		if err := dumpFolders(*serverURL); err != nil {
 			fmt.Fprintln(os.Stderr, err)
