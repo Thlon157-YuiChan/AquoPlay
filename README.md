@@ -72,7 +72,8 @@ aquoplay --list --server http://<recorder-ip>:<port>/
 |------|------|
 | ↑ / k | 上に移動 |
 | ↓ / j | 下に移動 |
-| P | 選択した録画をストリーミング再生 |
+| P / Enter | フォルダを開く / 録画を再生 |
+| Backspace | 親フォルダに戻る |
 | r | 録画一覧を再読込 |
 | Esc | レコーダー選択に戻る (複数台時) |
 | q / Ctrl+C | 終了 |
