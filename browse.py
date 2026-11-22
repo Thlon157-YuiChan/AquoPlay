@@ -44,7 +44,7 @@ async def main() -> None:
                     folders.append({
                         "id": item.id,
                         "title": item.title or item.id,
-                        "parent_id": item.parent_id or "",
+                        "parent_id": item.parent_id if item.parent_id else "0",
                         "child_count": item.child_count,
                     })
                     pending.append(item.id)
