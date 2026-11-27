@@ -4,19 +4,19 @@
 package main
 
 import (
-	_ "embed"
-	"encoding/json"
+	"context"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/Thlon157-YuiChan/AquoPlay/recorder"
 )
 
 var (
@@ -25,35 +25,11 @@ var (
 	mpvBin      string
 )
 
-//go:embed browse.py
-var browseScript []byte
-
-//go:embed stream.py
-var streamScript []byte
-
-type folder struct {
-	ID       string
-	Title    string
-	ParentID string
-}
-
-type server struct {
-	Name  string
-	Model string
-	URL   string
-}
-
-type recording struct {
-	ID        string
-	ParentID  string
-	Title     string
-	Date      string
-	Duration  string
-	Size      int64
-	Encrypted bool
-	URL       string
-	Broadcast bool
-}
+// Type aliases keep the rest of main.go readable while delegating to the
+// reusable recorder package.
+type folder = recorder.Folder
+type server = recorder.Server
+type recording = recorder.Recording
 
 type phase int
 
@@ -64,20 +40,20 @@ const (
 )
 
 type model struct {
-	phase          phase
-	servers        []server
-	serverIdx      int
-	folders        []folder
-	recs           []recording
-	currentFolder  string
-	viewMode       string // "folders" or "recordings"
-	cursor         int
-	width          int
-	height         int
-	err            string
-	status         string
-	serverURL      string
-	serverName     string
+	phase         phase
+	servers       []server
+	serverIdx     int
+	folders       []folder
+	recs          []recording
+	currentFolder string
+	viewMode      string // "folders" or "recordings"
+	cursor        int
+	width         int
+	height        int
+	err           string
+	status        string
+	serverURL     string
+	serverName    string
 }
 
 type serversMsg struct {
@@ -103,13 +79,10 @@ var (
 
 func discoverCmd() tea.Cmd {
 	return func() tea.Msg {
-		cmd := exec.Command("pydtcpip", "discover", "--timeout", "5")
-		cmd.Env = append(os.Environ(), "COLUMNS=300")
-		out, err := cmd.CombinedOutput()
+		servers, err := recorder.Discover(context.Background(), 5)
 		if err != nil {
-			return serversMsg{err: fmt.Errorf("%v\n%s", err, strings.TrimSpace(string(out)))}
+			return serversMsg{err: err}
 		}
-		servers := parseServers(string(out))
 		if len(servers) == 0 {
 			return serversMsg{err: fmt.Errorf("レコーダーが見つかりませんでした")}
 		}
@@ -117,195 +90,23 @@ func discoverCmd() tea.Cmd {
 	}
 }
 
-func parseServers(out string) []server {
-	var servers []server
-	for _, line := range strings.Split(out, "\n") {
-		if !strings.Contains(line, "│") {
-			continue
-		}
-		parts := strings.Split(line, "│")
-		if len(parts) < 6 {
-			continue
-		}
-		url := strings.TrimSpace(parts[5])
-		if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
-			continue
-		}
-		servers = append(servers, server{
-			Name:  strings.TrimSpace(parts[1]),
-			Model: strings.TrimSpace(parts[3]),
-			URL:   url,
-		})
-	}
-	return servers
-}
-
 func browseCmd(url string) tea.Cmd {
 	return func() tea.Msg {
-		// Write embedded script to temp file
-		tmpDir, err := os.MkdirTemp("", "dlna-browse-")
+		res, err := recorder.Browse(context.Background(), url)
 		if err != nil {
 			return recordingsMsg{err: err}
 		}
-		defer os.RemoveAll(tmpDir)
-		scriptPath := filepath.Join(tmpDir, "browse.py")
-		if err := os.WriteFile(scriptPath, browseScript, 0o644); err != nil {
-			return recordingsMsg{err: err}
-		}
-
-		// Find a Python interpreter with pydtcpip
-		pythonBin := findPython()
-		if pythonBin == "" {
-			return recordingsMsg{err: fmt.Errorf("pydtcpip が使える Python が見つかりません")}
-		}
-
-		cmd := exec.Command(pythonBin, scriptPath, url)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			return recordingsMsg{err: fmt.Errorf("%v\n%s", err, strings.TrimSpace(string(out)))}
-		}
-		folders, recs, err := parseBrowseResult(out)
-		if err != nil {
-			return recordingsMsg{err: err}
-		}
-		if len(recs) == 0 && len(folders) == 0 {
+		if len(res.Recordings) == 0 && len(res.Folders) == 0 {
 			return recordingsMsg{err: fmt.Errorf("録画が見つかりませんでした")}
 		}
-		return recordingsMsg{folders: folders, recs: recs}
+		return recordingsMsg{folders: res.Folders, recs: res.Recordings}
 	}
-}
-
-func findPython() string {
-	// Try uv tool's python (common install location)
-	uvPython := filepath.Join(os.Getenv("HOME"), ".local", "share", "uv", "tools", "pydtcpip", "bin", "python")
-	if _, err := os.Stat(uvPython); err == nil {
-		return uvPython
-	}
-	// Try python3.13 explicitly
-	if path, err := exec.LookPath("python3.13"); err == nil {
-		check := exec.Command(path, "-c", "import pydtcpip")
-		if check.Run() == nil {
-			return path
-		}
-	}
-	// Try system python3 with pydtcpip
-	if path, err := exec.LookPath("python3"); err == nil {
-		check := exec.Command(path, "-c", "import pydtcpip")
-		if check.Run() == nil {
-			return path
-		}
-	}
-	// Try uv run (if uv is available)
-	if uvPath, err := exec.LookPath("uv"); err == nil {
-		// Create a wrapper that uses uv run
-		// We return a special marker and handle it in the caller
-		_ = uvPath
-	}
-	return ""
-}
-
-type didlLite struct {
-	Items []didlItem `xml:"item"`
-}
-
-type didlItem struct {
-	ID       string    `xml:"id,attr"`
-	ParentID string    `xml:"parentID,attr"`
-	Title    string    `xml:"title"`
-	Date     string    `xml:"date"`
-	Res      []didlRes `xml:"res"`
-}
-
-type didlRes struct {
-	Duration string `xml:"duration,attr"`
-	Size     string `xml:"size,attr"`
-}
-
-type browseFolder struct {
-	ID         string `json:"id"`
-	Title      string `json:"title"`
-	ParentID   string `json:"parent_id"`
-	ChildCount *int   `json:"child_count"`
-}
-
-type browseRecording struct {
-	ID        string `json:"id"`
-	Title     string `json:"title"`
-	ParentID  string `json:"parent_id"`
-	Date      string `json:"date"`
-	Duration  string `json:"duration"`
-	Size      int64  `json:"size"`
-	Encrypted bool   `json:"encrypted"`
-	URL       string `json:"url"`
-	Broadcast bool   `json:"broadcast"`
-}
-
-type browseResult struct {
-	Folders    []browseFolder    `json:"folders"`
-	Recordings []browseRecording `json:"recordings"`
-}
-
-func parseBrowseResult(data []byte) ([]folder, []recording, error) {
-	var result browseResult
-	if err := json.Unmarshal(data, &result); err != nil {
-		return nil, nil, err
-	}
-	var folders []folder
-	for _, f := range result.Folders {
-		folders = append(folders, folder{
-			ID:       f.ID,
-			Title:    f.Title,
-			ParentID: f.ParentID,
-		})
-	}
-	var recs []recording
-	for _, item := range result.Recordings {
-		rec := recording{
-			ID:        item.ID,
-			ParentID:  item.ParentID,
-			Title:     strings.TrimSpace(item.Title),
-			Date:      strings.TrimSpace(item.Date),
-			Duration:  item.Duration,
-			Size:      item.Size,
-			Encrypted: item.Encrypted,
-			URL:       item.URL,
-			Broadcast: item.Broadcast,
-		}
-		if rec.Title == "" {
-			rec.Title = filepath.Base(item.ID)
-		}
-		recs = append(recs, rec)
-	}
-	sort.SliceStable(recs, func(i, j int) bool {
-		if recs[i].Date == recs[j].Date {
-			return recs[i].Title < recs[j].Title
-		}
-		return recs[i].Date > recs[j].Date
-	})
-	return folders, recs, nil
 }
 
 func playCmd(url string, rec recording) tea.Cmd {
-	// Setup synchronously before returning ExecProcess
-	tmpDir, err := os.MkdirTemp("", "dlna-stream-")
-	if err != nil {
-		return func() tea.Msg { return playbackDoneMsg{err: err} }
-	}
-	scriptPath := filepath.Join(tmpDir, "stream.py")
-	if err := os.WriteFile(scriptPath, streamScript, 0o644); err != nil {
-		os.RemoveAll(tmpDir)
-		return func() tea.Msg { return playbackDoneMsg{err: err} }
-	}
-
-	pythonBin := findPython()
-	if pythonBin == "" {
-		os.RemoveAll(tmpDir)
-		return func() tea.Msg { return playbackDoneMsg{err: fmt.Errorf("pydtcpip が使える Python が見つかりません")} }
-	}
-
 	var playerBin string
 	var playerArgs string
-	title := shellQuote(rec.Title)
+	title := recorder.ShellQuote(rec.Title)
 	if mpvBin != "" {
 		playerBin = mpvBin
 		playerArgs = fmt.Sprintf("--no-terminal --force-seekable=no --cache=yes --title=%s -", title)
@@ -314,17 +115,15 @@ func playCmd(url string, rec recording) tea.Cmd {
 		playerArgs = fmt.Sprintf("-loglevel panic -nostats -autoexit -window_title %s -i pipe:0", title)
 	}
 
-	script := fmt.Sprintf("%s %s %s %s | %s %s",
-		pythonBin, scriptPath, shellQuote(url), shellQuote(rec.ID), playerBin, playerArgs)
-	c := exec.Command("sh", "-c", script)
-	return tea.ExecProcess(c, func(err error) tea.Msg {
-		os.RemoveAll(tmpDir)
+	cmd, clean, err := recorder.PlayCommand(url, rec, playerBin, playerArgs)
+	if err != nil {
+		clean()
+		return func() tea.Msg { return playbackDoneMsg{err: err} }
+	}
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		clean()
 		return playbackDoneMsg{err: err}
 	})
-}
-
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func humanSize(n int64) string {
@@ -622,7 +421,7 @@ func (m model) View() string {
 		for i, s := range m.servers {
 			label := fmt.Sprintf("%s  %s", s.Name, dimStyle.Render(s.Model))
 			if i == m.serverIdx {
-				b.WriteString(selStyle.Render("❯ " + label) + "\n")
+				b.WriteString(selStyle.Render("❯ "+label) + "\n")
 			} else {
 				b.WriteString("  " + label + "\n")
 			}
@@ -647,7 +446,7 @@ func (m model) listView() string {
 	if folderPath == "" || folderPath == "0" {
 		folderPath = "ルート"
 	}
-	b.WriteString(dimStyle.Render("フォルダ: " + folderPath) + "\n\n")
+	b.WriteString(dimStyle.Render("フォルダ: "+folderPath) + "\n\n")
 
 	height := m.height
 	if height <= 0 {
@@ -718,17 +517,14 @@ func (m model) listView() string {
 	return b.String()
 }
 
-
 func listRecordings(serverURL string) error {
 	servers := []server{{URL: serverURL}}
 	if serverURL == "" {
-		cmd := exec.Command("pydtcpip", "discover", "--timeout", "5")
-		cmd.Env = append(os.Environ(), "COLUMNS=300")
-		out, err := cmd.CombinedOutput()
+		discovered, err := recorder.Discover(context.Background(), 5)
 		if err != nil {
-			return fmt.Errorf("%v\n%s", err, strings.TrimSpace(string(out)))
+			return err
 		}
-		servers = parseServers(string(out))
+		servers = discovered
 		if len(servers) == 0 {
 			return fmt.Errorf("レコーダーが見つかりませんでした")
 		}
@@ -736,34 +532,11 @@ func listRecordings(serverURL string) error {
 	for _, s := range servers {
 		fmt.Printf("%s  %s  %s\n", s.Name, s.Model, s.URL)
 
-		// Write embedded script to temp file
-		tmpDir, err := os.MkdirTemp("", "dlna-browse-")
+		res, err := recorder.Browse(context.Background(), s.URL)
 		if err != nil {
 			return err
 		}
-		scriptPath := filepath.Join(tmpDir, "browse.py")
-		if err := os.WriteFile(scriptPath, browseScript, 0o644); err != nil {
-			os.RemoveAll(tmpDir)
-			return err
-		}
-
-		pythonBin := findPython()
-		if pythonBin == "" {
-			os.RemoveAll(tmpDir)
-			return fmt.Errorf("pydtcpip が使える Python が見つかりません")
-		}
-
-		cmd := exec.Command(pythonBin, scriptPath, s.URL)
-		out, err := cmd.CombinedOutput()
-		os.RemoveAll(tmpDir)
-		if err != nil {
-			return fmt.Errorf("%v\n%s", err, strings.TrimSpace(string(out)))
-		}
-		_, recs, err := parseBrowseResult(out)
-		if err != nil {
-			return err
-		}
-		for _, rec := range recs {
+		for _, rec := range res.Recordings {
 			prefix := "E"
 			if !rec.Encrypted {
 				prefix = "F"
@@ -781,13 +554,11 @@ func listRecordings(serverURL string) error {
 func dumpFolders(serverURL string) error {
 	servers := []server{{URL: serverURL}}
 	if serverURL == "" {
-		cmd := exec.Command("pydtcpip", "discover", "--timeout", "5")
-		cmd.Env = append(os.Environ(), "COLUMNS=300")
-		out, err := cmd.CombinedOutput()
+		discovered, err := recorder.Discover(context.Background(), 5)
 		if err != nil {
-			return fmt.Errorf("%v\n%s", err, strings.TrimSpace(string(out)))
+			return err
 		}
-		servers = parseServers(string(out))
+		servers = discovered
 		if len(servers) == 0 {
 			return fmt.Errorf("レコーダーが見つかりませんでした")
 		}
@@ -795,43 +566,23 @@ func dumpFolders(serverURL string) error {
 	for _, s := range servers {
 		fmt.Printf("%s  %s  %s\n", s.Name, s.Model, s.URL)
 
-		tmpDir, err := os.MkdirTemp("", "dlna-browse-")
-		if err != nil {
-			return err
-		}
-		scriptPath := filepath.Join(tmpDir, "browse.py")
-		if err := os.WriteFile(scriptPath, browseScript, 0o644); err != nil {
-			os.RemoveAll(tmpDir)
-			return err
-		}
-		pythonBin := findPython()
-		if pythonBin == "" {
-			os.RemoveAll(tmpDir)
-			return fmt.Errorf("pydtcpip が使える Python が見つかりません")
-		}
-		cmd := exec.Command(pythonBin, scriptPath, s.URL)
-		out, err := cmd.CombinedOutput()
-		os.RemoveAll(tmpDir)
-		if err != nil {
-			return fmt.Errorf("%v\n%s", err, strings.TrimSpace(string(out)))
-		}
-		folders, recs, err := parseBrowseResult(out)
+		res, err := recorder.Browse(context.Background(), s.URL)
 		if err != nil {
 			return err
 		}
 		fmt.Println("=== Folders ===")
-		for _, f := range folders {
+		for _, f := range res.Folders {
 			fmt.Printf("  %s (parent: %s)\n", f.ID, f.ParentID)
 		}
 		fmt.Println("=== Recordings per folder ===")
 		folderCounts := make(map[string]int)
-		for _, r := range recs {
+		for _, r := range res.Recordings {
 			folderCounts[r.ParentID]++
 		}
 		for folder, count := range folderCounts {
 			fmt.Printf("  %s: %d recordings\n", folder, count)
 		}
-		fmt.Printf("Total: %d folders, %d recordings\n", len(folders), len(recs))
+		fmt.Printf("Total: %d folders, %d recordings\n", len(res.Folders), len(res.Recordings))
 	}
 	return nil
 }

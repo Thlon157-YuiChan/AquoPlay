@@ -94,6 +94,23 @@ aquoplay --list --server http://<recorder-ip>:<port>/
 - **再生が開始されない**: mpv/ffplay がインストールされているか確認してください。
 - **一部の録画が再生できない**: E-EMI 0x0 の録画は pydtcpip のモンキーパッチで対応済みです。それでも再生できない場合はログ (`/tmp/dlna-py.log`, `/tmp/dlna-mpv.log`) を確認してください。
 
+## ライブラリとして利用
+
+`recorder` パッケージは他の Go アプリケーションから再利用できます。
+
+```go
+import "github.com/Thlon157-YuiChan/AquoPlay/recorder"
+
+servers, _ := recorder.Discover(ctx, 5)
+res, _ := recorder.Browse(ctx, servers[0].URL)
+for _, rec := range res.Recordings {
+    fmt.Println(rec.Title)
+}
+```
+
+Python インタプリタの探索 (`recorder.FindPython`) やストリーミング
+(`recorder.StartStream` / `recorder.PlayCommand`) も公開しています。
+
 ## ライセンス
 
 MIT

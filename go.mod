@@ -1,4 +1,4 @@
-module aquoplay
+module github.com/Thlon157-YuiChan/AquoPlay
 
 go 1.27.4
 
